@@ -1,0 +1,51 @@
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_message:
+        description: "Отправить тестовое сообщение в чат"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Проверка доступности
+        env:
+          ALERT_BOT_TOKEN: ${{ secrets.ALERT_BOT_TOKEN }}
+          ALERT_CHAT_ID: ${{ secrets.ALERT_CHAT_ID }}
+          TRAINER_BOT_TOKEN: ${{ secrets.TRAINER_BOT_TOKEN }}
+          TEST_MESSAGE: ${{ inputs.test_message && '1' || '' }}
+        run: python3 monitor.py
+
+      - name: Сохранить состояние
+        if: always()
+        run: |
+          # GitHub отключает расписание в публичном репо после 60 дней без
+          # активности. Раз в 20 дней оставляем след, чтобы этого не случилось.
+          last_commit=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last_commit )) -gt 1728000 ]; then
+            date -u +%FT%TZ > .keepalive
+          fi
+          git add state.json
+          [ -f .keepalive ] && git add .keepalive
+          if ! git diff --cached --quiet; then
+            git config user.name "uptime-monitor"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q -m "state: $(date -u +%FT%TZ)"
+            git pull -q --rebase && git push -q
+          fi
