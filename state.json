@@ -4,5 +4,8 @@
   },
   "trainer": {
     "fails": 0
+  },
+  "trainer_bot": {
+    "fails": 0
   }
 }
