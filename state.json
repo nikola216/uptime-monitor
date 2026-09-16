@@ -8,7 +8,7 @@
   "trainer_bot": {
     "alerted": true,
     "down_since": 1789511509,
-    "fails": 2,
+    "fails": 3,
     "last_error": "в очереди 1, Telegram пишет: «Connection timed out»"
   }
 }
