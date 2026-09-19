@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Внешний мониторинг доступности. Запускается GitHub Actions раз в 5 минут.
+"""Внешний мониторинг доступности. Запускается GitHub Actions.
 
-Проверка идёт снаружи сервера, оттуда же, откуда приходят пользователи и сам
-Telegram. Изнутри сервера сбой сети не виден: там всё отвечает, даже когда
-снаружи сайт недоступен.
+Проверка идёт снаружи сервера, оттуда же, откуда приходят пользователи.
+Изнутри сервера сбой сети не виден: там всё отвечает, даже когда снаружи
+сайт недоступен.
 
-Сообщение уходит только при смене состояния: после двух проваленных запусков
-подряд и один раз при восстановлении.
+Сообщение уходит только при смене состояния: при первом проваленном запуске
+и один раз при восстановлении.
 """
 
 import html
@@ -22,11 +22,12 @@ from datetime import datetime, timedelta, timezone
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
-FAILS_TO_ALERT = 2  # проваленных запусков подряд до алерта
+# Один запуск — это уже три попытки подряд, поэтому ждать второго нет смысла:
+# расписание GitHub плавает, и второй запуск может случиться через несколько часов.
+FAILS_TO_ALERT = 1
 ATTEMPTS = 3  # попыток внутри одного запуска
 ATTEMPT_TIMEOUT = 15  # секунд на попытку
 ATTEMPT_PAUSE = 10  # секунд между попытками
-WEBHOOK_ERROR_WINDOW = 15 * 60  # ошибка доставки считается свежей, секунд
 MSK = timezone(timedelta(hours=3))
 
 SITES = [
@@ -38,15 +39,20 @@ BOT_TITLE = "Бот тренажёра в Telegram"
 
 
 def check_site(url):
-    """Сайт доступен, если хотя бы одна попытка вернула 200."""
+    """Сайт доступен, если хотя бы одна попытка вернула 200. Отдаёт и тело ответа."""
     error = ""
     for attempt in range(1, ATTEMPTS + 1):
         started = time.monotonic()
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "uptime-monitor"})
             with urllib.request.urlopen(request, timeout=ATTEMPT_TIMEOUT) as response:
+                raw = response.read(64 * 1024)
                 if response.status == 200:
-                    return True, f"200 за {time.monotonic() - started:.1f} с"
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        payload = {}
+                    return True, f"200 за {time.monotonic() - started:.1f} с", payload
                 error = f"HTTP {response.status}"
         except urllib.error.HTTPError as exc:
             error = f"HTTP {exc.code}"
@@ -54,26 +60,23 @@ def check_site(url):
             error = f"{type(exc).__name__}: {exc}"[:160]
         if attempt < ATTEMPTS:
             time.sleep(ATTEMPT_PAUSE)
-    return False, f"{ATTEMPTS} попытки не прошли, последняя ошибка: {error}"
+    return False, f"{ATTEMPTS} попытки не прошли, последняя ошибка: {error}", {}
 
 
-def check_bot(token):
-    """Бот сломан, если Telegram прямо сейчас не может доставить ему апдейты."""
-    try:
-        url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
-        with urllib.request.urlopen(url, timeout=20) as response:
-            info = json.load(response)["result"]
-    except Exception as exc:
-        # Не смогли спросить Telegram — это не падение бота, состояние не трогаем.
-        # В лог пишется только тип ошибки: текст мог бы содержать URL с токеном.
-        print(f"{BOT_ID}: getWebhookInfo не ответил ({type(exc).__name__})")
-        return None, "нет данных"
-    pending = info.get("pending_update_count", 0)
-    error_at = info.get("last_error_date") or 0
-    if pending and time.time() - error_at < WEBHOOK_ERROR_WINDOW:
-        reason = info.get("last_error_message", "без описания")
-        return False, f"в очереди {pending}, Telegram пишет: «{reason}»"
-    return True, f"очередь {pending}"
+def check_bot(health):
+    """Состояние бота приложение отдаёт само в /api/v1/health.
+
+    Раньше здесь спрашивался getWebhookInfo, но бот переведён на опрос Telegram:
+    вебхука больше нет, и та проверка всегда показывала бы «всё хорошо».
+    """
+    telegram = (health or {}).get("telegram") or {}
+    mode = telegram.get("mode")
+    if not mode or mode == "off":
+        return None, "опрос выключен"
+    if telegram.get("ok"):
+        return True, f"опрос жив, обработано апдейтов: {telegram.get('updatesHandled', 0)}"
+    reason = telegram.get("lastError") or "последний успешный запрос слишком давно"
+    return False, f"опрос не отвечает: {reason}"
 
 
 def moment(ts):
@@ -83,7 +86,7 @@ def moment(ts):
 def alert_text(title, since, fails, detail, is_bot):
     lines = ["#мониторинг #алерт"]
     if is_bot:
-        lines += [f"<b>{title}: не получает сообщения</b>", "", "Telegram не может достучаться до сервера."]
+        lines += [f"<b>{title}: не получает сообщения</b>", "", "Приложение работает, но канал до Telegram молчит."]
     else:
         lines += [f"<b>{title}: недоступен снаружи</b>"]
     lines += [
@@ -154,10 +157,19 @@ def main():
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
 
-    results = [(site_id, title, False, *check_site(url)) for site_id, title, url in SITES]
-    bot_token = os.environ.get("TRAINER_BOT_TOKEN", "")
-    if bot_token:
-        results.append((BOT_ID, BOT_TITLE, True, *check_bot(bot_token)))
+    results = []
+    trainer_health = {}
+    for site_id, title, url in SITES:
+        ok, detail, payload = check_site(url)
+        if site_id == "trainer":
+            trainer_health = payload
+        results.append((site_id, title, False, ok, detail))
+
+    if trainer_health:
+        results.append((BOT_ID, BOT_TITLE, True, *check_bot(trainer_health)))
+    else:
+        # Сайт не ответил — про бота ничего не известно, состояние не трогаем.
+        results.append((BOT_ID, BOT_TITLE, True, None, "сайт не ответил"))
 
     failed_sends = 0
     for target_id, title, is_bot, ok, detail in results:

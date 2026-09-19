@@ -28,7 +28,6 @@ jobs:
         env:
           ALERT_BOT_TOKEN: ${{ secrets.ALERT_BOT_TOKEN }}
           ALERT_CHAT_ID: ${{ secrets.ALERT_CHAT_ID }}
-          TRAINER_BOT_TOKEN: ${{ secrets.TRAINER_BOT_TOKEN }}
           TEST_MESSAGE: ${{ inputs.test_message && '1' || '' }}
         run: python3 monitor.py
 
