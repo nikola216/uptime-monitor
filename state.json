@@ -6,6 +6,9 @@
     "fails": 0
   },
   "trainer_bot": {
-    "fails": 0
+    "alerted": true,
+    "down_since": 1795083019,
+    "fails": 1,
+    "last_error": "опрос не отвечает: fetch failed"
   }
 }
