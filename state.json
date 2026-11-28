@@ -8,7 +8,7 @@
   "trainer_bot": {
     "alerted": true,
     "down_since": 1795083019,
-    "fails": 27,
+    "fails": 28,
     "last_error": "опрос не отвечает: fetch failed"
   }
 }
